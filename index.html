@@ -1157,6 +1157,40 @@ function renderExportPanel(){
 }
 
 /* ---- PDF au format officiel (dessin vectoriel : ressemble au modèle papier de la faculté) ---- */
+/* ---- utilitaires format officiel : abréviation modules, saison du semestre, préfixe commun de groupes ---- */
+const ABBR_STOPWORDS = new Set(["d","l","de","du","des","la","le","les","et","à","en","pour"]);
+function abbreviateModule(name){
+  return name.split(/[\s'’]+/)
+    .map(w=>w.replace(/[^\p{L}\p{N}]/gu,""))
+    .filter(w=>w.length>0 && !ABBR_STOPWORDS.has(w.toLowerCase()))
+    .map(w=> (w.length<=4 ? w : w.slice(0,4)).toUpperCase())
+    .join(" ");
+}
+function romanToInt(s){
+  const map={I:1,V:5,X:10,L:50,C:100};
+  let result=0;
+  for(let i=0;i<s.length;i++){
+    const cur=map[s[i]]||0, next=map[s[i+1]]||0;
+    result += (next>cur) ? -cur : cur;
+  }
+  return result;
+}
+function semestreSaison(semestreLabel){
+  if(!semestreLabel) return "";
+  const m = semestreLabel.match(/([IVXLC]+|\d+)/i);
+  if(!m) return "";
+  const raw = m[1];
+  const num = /^[0-9]+$/.test(raw) ? parseInt(raw,10) : romanToInt(raw.toUpperCase());
+  if(!num) return "";
+  return (num % 2 === 1) ? "SEMESTRE D'AUTOMNE" : "SEMESTRE DE PRINTEMPS";
+}
+function commonGroupLabel(groupeIds){
+  const names = groupeIds.map(groupeName);
+  const stripped = names.map(n=>n.replace(/[0-9]+$/,""));
+  const allSame = stripped.every(s=>s && s===stripped[0]);
+  return allSame ? stripped[0] : names.join("+");
+}
+
 function exportPDF(seances, title, meta){
   if(!window.jspdf){ toast("Bibliothèque PDF indisponible (connexion internet requise)."); return; }
   const { jsPDF } = window.jspdf;
@@ -1184,7 +1218,7 @@ function exportPDF(seances, title, meta){
   doc.setFont("times","bold"); doc.setFontSize(16);
   doc.text("EMPLOI DU TEMPS", pageW/2, 112, {align:"center"});
   doc.setFont("times","normal"); doc.setFontSize(11);
-  doc.text(meta.semestreLabel, pageW/2, 130, {align:"center"});
+  doc.text(semestreSaison(meta.semestreLabel) || meta.semestreLabel, pageW/2, 130, {align:"center"});
 
   /* ---- grille ---- */
   const dayColW = 68;
@@ -1237,12 +1271,25 @@ function exportPDF(seances, title, meta){
     doc.text(day, gridLeft+10, y + rowH/2 + 4);
   });
 
-  /* séances : affectation de "voies" (lanes) par jour pour éviter le chevauchement visuel */
+  /* séances : fusion des groupes identiques (A1+A2 → "A") puis affectation de "voies" (lanes) par jour */
   DAYS.forEach((day,d)=>{
     const y0 = firstRowY + d*rowH;
     const daySeances = seances.filter(s=>s.jour===day).sort((a,b)=>a.debut-b.debut || a.fin-b.fin);
+
+    const used = new Set();
+    const merged = [];
+    daySeances.forEach(sc=>{
+      if(used.has(sc.id)) return;
+      const dupes = daySeances.filter(o=>o.id!==sc.id && !used.has(o.id) &&
+        o.moduleId===sc.moduleId && o.salleId===sc.salleId && o.enseignantId===sc.enseignantId &&
+        o.debut===sc.debut && o.fin===sc.fin);
+      const groupeIds = [sc.groupeId, ...dupes.map(x=>x.groupeId)];
+      used.add(sc.id); dupes.forEach(x=>used.add(x.id));
+      merged.push({...sc, label: commonGroupLabel(groupeIds)});
+    });
+
     const lanesEnd = [];
-    const placed = daySeances.map(sc=>{
+    const placed = merged.map(sc=>{
       let lane = 0;
       while(lanesEnd[lane] !== undefined && lanesEnd[lane] > sc.debut) lane++;
       lanesEnd[lane] = sc.fin;
@@ -1261,7 +1308,7 @@ function exportPDF(seances, title, meta){
       doc.line(x1, ly-3, x1, ly+3);
       doc.line(x2, ly-3, x2, ly+3);
 
-      const label = `${groupeName(sc.groupeId)} : ${moduleName(sc.moduleId)} : ${salleName(sc.salleId)}`;
+      const label = `${sc.label} : ${abbreviateModule(moduleName(sc.moduleId))} : ${salleName(sc.salleId)}`;
       doc.setFont("times","normal"); doc.setFontSize(6.6);
       doc.text(label, x1+2, ly-4);
     });
