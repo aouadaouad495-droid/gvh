@@ -1094,18 +1094,34 @@ function buildSwapRequestCard(mySeances){
 /* =========================================================================
    PANEL: EXPORT (PDF / Excel)
    ========================================================================= */
+function computeExportMeta(seances){
+  const groupeIds = [...new Set(seances.map(s=>s.groupeId))];
+  const filiereIds = [...new Set(groupeIds.map(gid=>{const g=byId(db.groupes,gid); return g?g.filiereId:null;}).filter(Boolean))];
+  let filiereLabel="—", semestreLabel="—", anneeLabel = (db.filieres[0]||{}).annee || "2025-26";
+  if(filiereIds.length===1){
+    const fil = byId(db.filieres, filiereIds[0]);
+    if(fil){ filiereLabel = fil.nom; semestreLabel = fil.semestre; anneeLabel = fil.annee; }
+  } else if(filiereIds.length>1){
+    filiereLabel = filiereIds.map(id=>(byId(db.filieres,id)||{}).nom).join(" / ");
+  }
+  let sectionLabel = "—";
+  if(groupeIds.length===1) sectionLabel = groupeName(groupeIds[0]);
+  else if(groupeIds.length>1) sectionLabel = groupeIds.map(groupeName).join(", ");
+  return {filiereLabel, semestreLabel, anneeLabel, sectionLabel};
+}
+
 function renderExportPanel(){
   const card = document.createElement("div"); card.className="card";
   const h = document.createElement("h2"); h.textContent = "Export du planning";
   card.appendChild(h);
-  const sub = document.createElement("div"); sub.className="sub"; sub.textContent="Générez un PDF ou un fichier Excel de l'emploi du temps affiché.";
+  const sub = document.createElement("div"); sub.className="sub"; sub.textContent="Générez un PDF au format officiel ou un fichier Excel de l'emploi du temps affiché.";
   card.appendChild(sub);
 
-  let scope = "role";
-  let seancesToExport, exportTitle;
+  let seancesToExport, exportTitle, extraLine=null;
   if(currentUser.role==="enseignant"){
     seancesToExport = db.seances.filter(s=>s.enseignantId===currentUser.enseignantId);
     exportTitle = "Emploi du temps — "+currentUser.nom;
+    extraLine = {label:"Enseignant", value: currentUser.nom};
   } else if(currentUser.role==="etudiant"){
     seancesToExport = db.seances.filter(s=>s.groupeId===currentUser.groupeId);
     exportTitle = "Emploi du temps — "+groupeName(currentUser.groupeId);
@@ -1116,48 +1132,147 @@ function renderExportPanel(){
     card.appendChild(renderFilterToolbar(false));
   }
 
+  const meta = computeExportMeta(seancesToExport);
+  if(extraLine) meta.extraLine = extraLine;
+
   const tb = document.createElement("div"); tb.className="toolbar";
   const pdfBtn = document.createElement("button"); pdfBtn.className="btn btn-navy"; pdfBtn.textContent="Exporter en PDF";
-  pdfBtn.onclick = ()=> exportPDF(seancesToExport, exportTitle);
+  pdfBtn.onclick = ()=> exportPDF(seancesToExport, exportTitle, meta);
   const xlsBtn = document.createElement("button"); xlsBtn.className="btn btn-gold"; xlsBtn.textContent="Exporter en Excel";
   xlsBtn.onclick = ()=> exportExcel(seancesToExport, exportTitle);
   tb.appendChild(pdfBtn); tb.appendChild(xlsBtn);
   card.appendChild(tb);
 
+  const previewNote = document.createElement("div");
+  previewNote.className = "small-note";
+  previewNote.textContent = "Aperçu ci-dessous (le PDF exporté suit le format officiel de la faculté) :";
+  card.appendChild(previewNote);
+
   const preview = document.createElement("div");
-  preview.style.marginTop = "16px";
+  preview.id = "exportPreviewGrid";
+  preview.style.marginTop = "10px";
   preview.appendChild(buildGrid(seancesToExport, false));
   card.appendChild(preview);
   return card;
 }
 
-function exportPDF(seances, title){
+/* ---- PDF au format officiel (dessin vectoriel : ressemble au modèle papier de la faculté) ---- */
+function exportPDF(seances, title, meta){
   if(!window.jspdf){ toast("Bibliothèque PDF indisponible (connexion internet requise)."); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({orientation:"landscape", unit:"pt", format:"a4"});
-  doc.setFont("helvetica","bold"); doc.setFontSize(16);
-  doc.text(title, 40, 40);
-  doc.setFont("helvetica","normal"); doc.setFontSize(10);
-  doc.text("Faculté des Sciences de Meknès — Généré le "+new Date().toLocaleDateString("fr-FR"), 40, 58);
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 40;
 
-  let y = 90;
-  DAYS.forEach(day=>{
-    const daySeances = seances.filter(s=>s.jour===day).sort((a,b)=>a.debut-b.debut);
-    if(daySeances.length===0) return;
-    doc.setFont("helvetica","bold"); doc.setFontSize(12);
-    doc.text(day, 40, y);
-    y += 16;
-    doc.setFont("helvetica","normal"); doc.setFontSize(10);
-    daySeances.forEach(sc=>{
-      const line = `${sc.debut}h-${sc.fin}h   ${groupeName(sc.groupeId)}   ${moduleName(sc.moduleId)}   ${enseignantName(sc.enseignantId)}   Salle ${salleName(sc.salleId)}`;
-      doc.text(line, 55, y);
-      y += 15;
-      if(y > 540){ doc.addPage(); y = 40; }
-    });
-    y += 8;
+  /* ---- en-tête façon document officiel ---- */
+  doc.setFont("times","bold"); doc.setFontSize(11);
+  doc.text("UNIVERSITE MOULAY ISMAIL", margin+100, 44, {align:"center"});
+  doc.text("FACULTE DES SCIENCES", margin+100, 58, {align:"center"});
+  doc.text("MEKNES", margin+100, 72, {align:"center"});
+
+  const rx = pageW - margin - 10;
+  doc.setFont("times","bold"); doc.setFontSize(10);
+  doc.text(`Année universitaire : ${meta.anneeLabel}`, rx, 40, {align:"right"});
+  doc.text(`Filière : ${meta.filiereLabel}`, rx, 54, {align:"right"});
+  doc.text(`Semestre : ${meta.semestreLabel}`, rx, 68, {align:"right"});
+  doc.text(`Section : ${meta.sectionLabel}`, rx, 82, {align:"right"});
+  if(meta.extraLine){
+    doc.text(`${meta.extraLine.label} : ${meta.extraLine.value}`, rx, 96, {align:"right"});
+  }
+
+  doc.setFont("times","bold"); doc.setFontSize(16);
+  doc.text("EMPLOI DU TEMPS", pageW/2, 112, {align:"center"});
+  doc.setFont("times","normal"); doc.setFontSize(11);
+  doc.text(meta.semestreLabel, pageW/2, 130, {align:"center"});
+
+  /* ---- grille ---- */
+  const dayColW = 68;
+  const gridTop = 155;
+  const hourAxisH = 18;
+  const gridLeft = margin;
+  const gridRight = pageW - margin;
+  const totalHours = HOUR_END - HOUR_START;
+  const hourW = (gridRight - gridLeft - dayColW) / totalHours;
+  const firstRowY = gridTop + hourAxisH;
+  const rowH = Math.floor((pageH - 46 - firstRowY) / DAYS.length);
+
+  doc.setDrawColor(20,20,20);
+  doc.setLineWidth(0.7);
+
+  /* numéros d'heures + graduations */
+  doc.setFont("helvetica","normal"); doc.setFontSize(9);
+  for(let hIdx=0; hIdx<=totalHours; hIdx++){
+    const x = gridLeft + dayColW + hIdx*hourW;
+    if(hIdx<totalHours) doc.text(String(HOUR_START+hIdx), x+3, gridTop+12);
+    doc.setLineWidth(0.6);
+    doc.line(x, gridTop+hourAxisH-6, x, gridTop+hourAxisH);
+  }
+
+  /* lignes verticales pointillées sur toute la hauteur de la grille */
+  doc.setLineDash([1,2], 0);
+  doc.setLineWidth(0.4);
+  for(let hIdx=0; hIdx<=totalHours; hIdx++){
+    const x = gridLeft + dayColW + hIdx*hourW;
+    doc.line(x, firstRowY, x, firstRowY + rowH*DAYS.length);
+  }
+  doc.setLineDash([], 0);
+
+  /* cadre + séparateurs de lignes/colonnes (traits pleins) */
+  doc.setLineWidth(0.8);
+  doc.line(gridLeft, gridTop, gridRight, gridTop);
+  doc.line(gridLeft, firstRowY, gridRight, firstRowY);
+  for(let d=0; d<=DAYS.length; d++){
+    const y = firstRowY + d*rowH;
+    doc.line(gridLeft, y, gridRight, y);
+  }
+  doc.line(gridLeft, gridTop, gridLeft, firstRowY + rowH*DAYS.length);
+  doc.line(gridLeft+dayColW, gridTop, gridLeft+dayColW, firstRowY + rowH*DAYS.length);
+  doc.line(gridRight, gridTop, gridRight, firstRowY + rowH*DAYS.length);
+
+  /* noms des jours */
+  doc.setFont("times","normal"); doc.setFontSize(12);
+  DAYS.forEach((day,d)=>{
+    const y = firstRowY + d*rowH;
+    doc.text(day, gridLeft+10, y + rowH/2 + 4);
   });
+
+  /* séances : affectation de "voies" (lanes) par jour pour éviter le chevauchement visuel */
+  DAYS.forEach((day,d)=>{
+    const y0 = firstRowY + d*rowH;
+    const daySeances = seances.filter(s=>s.jour===day).sort((a,b)=>a.debut-b.debut || a.fin-b.fin);
+    const lanesEnd = [];
+    const placed = daySeances.map(sc=>{
+      let lane = 0;
+      while(lanesEnd[lane] !== undefined && lanesEnd[lane] > sc.debut) lane++;
+      lanesEnd[lane] = sc.fin;
+      return {sc, lane};
+    });
+    const numLanes = Math.max(1, lanesEnd.length);
+    const laneH = (rowH - 10) / numLanes;
+
+    placed.forEach(({sc,lane})=>{
+      const x1 = gridLeft + dayColW + (sc.debut-HOUR_START)*hourW;
+      const x2 = gridLeft + dayColW + (sc.fin-HOUR_START)*hourW;
+      const ly = y0 + 8 + laneH*(lane+0.5) + 8;
+
+      doc.setLineWidth(0.7);
+      doc.line(x1, ly, x2, ly);
+      doc.line(x1, ly-3, x1, ly+3);
+      doc.line(x2, ly-3, x2, ly+3);
+
+      const label = `${groupeName(sc.groupeId)} : ${moduleName(sc.moduleId)} : ${salleName(sc.salleId)}`;
+      doc.setFont("times","normal"); doc.setFontSize(6.6);
+      doc.text(label, x1+2, ly-4);
+    });
+  });
+
+  /* date de génération, bas de page */
+  doc.setFont("helvetica","normal"); doc.setFontSize(9);
+  doc.text(new Date().toLocaleDateString("fr-FR"), gridRight, pageH-20, {align:"right"});
+
   doc.save(title.replace(/\s+/g,"_")+".pdf");
-  toast("PDF généré.");
+  toast("PDF généré au format officiel.");
 }
 
 function exportExcel(seances, title){
