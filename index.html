@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Emploi du Temps — FS Meknès</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <style>
 :root{
   --navy:#132a45;
@@ -1139,7 +1139,7 @@ function renderExportPanel(){
   const pdfBtn = document.createElement("button"); pdfBtn.className="btn btn-navy"; pdfBtn.textContent="Exporter en PDF";
   pdfBtn.onclick = ()=> exportPDF(seancesToExport, exportTitle, meta);
   const xlsBtn = document.createElement("button"); xlsBtn.className="btn btn-gold"; xlsBtn.textContent="Exporter en Excel";
-  xlsBtn.onclick = ()=> exportExcel(seancesToExport, exportTitle);
+  xlsBtn.onclick = ()=> exportExcel(seancesToExport, exportTitle, meta);
   tb.appendChild(pdfBtn); tb.appendChild(xlsBtn);
   card.appendChild(tb);
 
@@ -1322,24 +1322,98 @@ function exportPDF(seances, title, meta){
   toast("PDF généré au format officiel.");
 }
 
-function exportExcel(seances, title){
+function exportExcel(seances, title, meta){
   if(!window.XLSX){ toast("Bibliothèque Excel indisponible (connexion internet requise)."); return; }
-  const rows = seances.slice().sort((a,b)=> DAYS.indexOf(a.jour)-DAYS.indexOf(b.jour) || a.debut-b.debut)
-    .map(sc=>({
-      Jour: sc.jour,
-      Début: sc.debut+"h",
-      Fin: sc.fin+"h",
-      Groupe: groupeName(sc.groupeId),
-      Module: moduleName(sc.moduleId),
-      Enseignant: enseignantName(sc.enseignantId),
-      Salle: salleName(sc.salleId)
-    }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws["!cols"] = [{wch:10},{wch:8},{wch:8},{wch:12},{wch:26},{wch:20},{wch:12}];
+  const totalHours = HOUR_END - HOUR_START;
+  const numCols = 1 + totalHours;
+  const thin = {style:"thin", color:{rgb:"999999"}};
+  const borderAll = {top:thin, bottom:thin, left:thin, right:thin};
+  const centerWrap = {horizontal:"center", vertical:"center", wrapText:true};
+
+  const ws = {};
+  const merges = [];
+  let r = 0;
+
+  function setCell(rr, cc, value, style){
+    const addr = XLSX.utils.encode_cell({r:rr, c:cc});
+    ws[addr] = {t:"s", v: value==null ? "" : String(value), s: style || {}};
+  }
+
+  setCell(r,0,"UNIVERSITE MOULAY ISMAIL — FACULTE DES SCIENCES — MEKNES", {font:{bold:true, sz:12}, alignment:centerWrap});
+  merges.push({s:{r,c:0}, e:{r,c:numCols-1}}); r++;
+
+  setCell(r,0,"EMPLOI DU TEMPS", {font:{bold:true, sz:15}, alignment:centerWrap});
+  merges.push({s:{r,c:0}, e:{r,c:numCols-1}}); r++;
+
+  setCell(r,0, semestreSaison(meta.semestreLabel) || meta.semestreLabel, {font:{italic:true, sz:11}, alignment:centerWrap});
+  merges.push({s:{r,c:0}, e:{r,c:numCols-1}}); r++;
+
+  const metaLine = `Année universitaire : ${meta.anneeLabel}    |    Filière : ${meta.filiereLabel}    |    Semestre : ${meta.semestreLabel}    |    Section : ${meta.sectionLabel}` +
+    (meta.extraLine ? `    |    ${meta.extraLine.label} : ${meta.extraLine.value}` : "");
+  setCell(r,0, metaLine, {font:{sz:10}, alignment:centerWrap});
+  merges.push({s:{r,c:0}, e:{r,c:numCols-1}}); r++;
+  r++; // ligne vide
+
+  const headerRow = r;
+  setCell(headerRow, 0, "Jour / Heure", {font:{bold:true, color:{rgb:"FFFFFF"}}, fill:{fgColor:{rgb:"132A45"}}, alignment:centerWrap, border:borderAll});
+  for(let h=0; h<totalHours; h++){
+    setCell(headerRow, 1+h, (HOUR_START+h)+"h", {font:{bold:true, color:{rgb:"FFFFFF"}}, fill:{fgColor:{rgb:"132A45"}}, alignment:centerWrap, border:borderAll});
+  }
+  r++;
+
+  DAYS.forEach(day=>{
+    const daySeances = seances.filter(s=>s.jour===day).sort((a,b)=>a.debut-b.debut || a.fin-b.fin);
+
+    const used = new Set();
+    const merged = [];
+    daySeances.forEach(sc=>{
+      if(used.has(sc.id)) return;
+      const dupes = daySeances.filter(o=>o.id!==sc.id && !used.has(o.id) &&
+        o.moduleId===sc.moduleId && o.salleId===sc.salleId && o.enseignantId===sc.enseignantId &&
+        o.debut===sc.debut && o.fin===sc.fin);
+      const groupeIds = [sc.groupeId, ...dupes.map(x=>x.groupeId)];
+      used.add(sc.id); dupes.forEach(x=>used.add(x.id));
+      merged.push({...sc, label: commonGroupLabel(groupeIds)});
+    });
+
+    const lanesEnd = [];
+    const placed = merged.map(sc=>{
+      let lane = 0;
+      while(lanesEnd[lane] !== undefined && lanesEnd[lane] > sc.debut) lane++;
+      lanesEnd[lane] = sc.fin;
+      return {sc, lane};
+    });
+    const numLanes = Math.max(1, lanesEnd.length);
+    const dayStartRow = r;
+
+    for(let lane=0; lane<numLanes; lane++){
+      setCell(dayStartRow+lane, 0, "", {border:borderAll});
+      for(let h=0; h<totalHours; h++){
+        setCell(dayStartRow+lane, 1+h, "", {border:borderAll});
+      }
+    }
+    setCell(dayStartRow, 0, day, {font:{bold:true}, alignment:centerWrap, border:borderAll, fill:{fgColor:{rgb:"F0EEE6"}}});
+    if(numLanes>1) merges.push({s:{r:dayStartRow,c:0}, e:{r:dayStartRow+numLanes-1,c:0}});
+
+    placed.forEach(({sc,lane})=>{
+      const c1 = 1 + (sc.debut-HOUR_START);
+      const c2 = 1 + (sc.fin-HOUR_START) - 1;
+      const label = `${sc.label} : ${abbreviateModule(moduleName(sc.moduleId))} : ${salleName(sc.salleId)}`;
+      setCell(dayStartRow+lane, c1, label, {font:{sz:9}, alignment:centerWrap, border:borderAll, fill:{fgColor:{rgb:"FFF3DC"}}});
+      if(c2>c1) merges.push({s:{r:dayStartRow+lane, c:c1}, e:{r:dayStartRow+lane, c:c2}});
+    });
+
+    r = dayStartRow + numLanes;
+  });
+
+  ws["!ref"] = XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:r-1, c:numCols-1}});
+  ws["!merges"] = merges;
+  ws["!cols"] = [{wch:13}, ...Array(totalHours).fill({wch:12})];
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Emploi du temps");
   XLSX.writeFile(wb, title.replace(/\s+/g,"_")+".xlsx");
-  toast("Fichier Excel généré.");
+  toast("Fichier Excel généré au format grille.");
 }
 
 /* =========================================================================
